@@ -90,7 +90,7 @@ func FormatBytes(bytes uint64) string {
 		exp++
 	}
 
-	return fmt.Sprintf("%.1f %s", float64(bytes)/float64(div), suffixes[exp])
+	return fmt.Sprintf("%.1f%s", float64(bytes)/float64(div), suffixes[exp])
 }
 
 // endregion Helpers
@@ -189,12 +189,16 @@ type Stats struct {
 	SizeAfter  uint64
 }
 
-func ConvertImages(paths []string) (*Stats, error) {
+func ConvertImages(paths []string) *Stats {
 	Progress.Reset()
 	Progress.ChangeMax(len(paths))
 	Progress.Describe("[cyan]Converting images...[reset]")
 
-	defer Progress.Exit()
+	defer func() {
+		Progress.Exit()
+
+		fmt.Println()
+	}()
 
 	stats := &Stats{}
 
@@ -230,7 +234,7 @@ func ConvertImages(paths []string) (*Stats, error) {
 
 	wg.Wait()
 
-	return stats, nil
+	return stats
 }
 
 // endregion Convert
@@ -262,11 +266,22 @@ func main() {
 		return
 	}
 
-	stats, err := ConvertImages(paths)
+	stats := ConvertImages(paths)
 
-	if err != nil {
-		panic(err)
+	if len(stats.Failed) < len(paths) {
+		savedSize := stats.SizeBefore - stats.SizeAfter
+		saved := float64(savedSize) / float64(stats.SizeBefore) * 100
+
+		fmt.Printf("Total size before: %s\n", FormatBytes(stats.SizeBefore))
+		fmt.Printf("Total size after: %s\n", FormatBytes(stats.SizeAfter))
+		fmt.Printf("Saved size: %s (%.2f%%)\n", FormatBytes(savedSize), saved)
 	}
 
-	fmt.Printf("\nBefore: %s, After: %s\n", FormatBytes(stats.SizeBefore), FormatBytes(stats.SizeAfter))
+	if len(stats.Failed) > 0 {
+		fmt.Println("Following files are failed:")
+
+		for _, path := range stats.Failed {
+			fmt.Printf("\t%s\n", path)
+		}
+	}
 }
