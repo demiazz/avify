@@ -173,6 +173,12 @@ func ConvertImage(path string) (uint64, uint64, error) {
 		return 0, 0, err
 	}
 
+	err = os.Remove(path)
+
+	if err != nil {
+		return 0, 0, err
+	}
+
 	return uint64(reader.count), uint64(len(bytes)), nil
 }
 
