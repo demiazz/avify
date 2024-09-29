@@ -14,10 +14,13 @@ import (
 
 	"github.com/davidbyttow/govips/v2/vips"
 	"github.com/schollz/progressbar/v3"
+	"github.com/spf13/cobra"
 	"golang.org/x/sync/semaphore"
 )
 
 // region Variables
+
+const Version = "0.1"
 
 const AllowedExtensions = `\.(gif|jpg|jpeg|png|webp)$`
 
@@ -252,36 +255,52 @@ func main() {
 
 	defer vips.Shutdown()
 
-	target := os.Args[1]
+	rootCmd := &cobra.Command{
+		Use:   "avify",
+		Short: "Avify allows to convert your reference images to AVIF format to save your storage space",
+		Args:  cobra.MinimumNArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			paths, err := FindImagesAt(args[0])
 
-	paths, err := FindImagesAt(target)
+			if err != nil {
+				panic(err)
+			}
 
-	if err != nil {
+			if len(paths) == 0 {
+				fmt.Println("No images found")
+
+				return
+			}
+
+			stats := ConvertImages(paths)
+
+			if len(stats.Failed) < len(paths) {
+				savedSize := stats.SizeBefore - stats.SizeAfter
+				saved := float64(savedSize) / float64(stats.SizeBefore) * 100
+
+				fmt.Printf("Total size before: %s\n", FormatBytes(stats.SizeBefore))
+				fmt.Printf("Total size after: %s\n", FormatBytes(stats.SizeAfter))
+				fmt.Printf("Saved size: %s (%.2f%%)\n", FormatBytes(savedSize), saved)
+			}
+
+			if len(stats.Failed) > 0 {
+				fmt.Println("Following files are failed:")
+
+				for _, path := range stats.Failed {
+					fmt.Printf("\t%s\n", path)
+				}
+			}
+		},
+	}
+
+	rootCmd.AddCommand(&cobra.Command{
+		Use: "version",
+		Run: func(cmd *cobra.Command, args []string) {
+			fmt.Printf("avify %s (%s, vips %v)\n", Version, runtime.Version(), vips.Version)
+		},
+	})
+
+	if err := rootCmd.Execute(); err != nil {
 		panic(err)
-	}
-
-	if len(paths) == 0 {
-		fmt.Println("No images found")
-
-		return
-	}
-
-	stats := ConvertImages(paths)
-
-	if len(stats.Failed) < len(paths) {
-		savedSize := stats.SizeBefore - stats.SizeAfter
-		saved := float64(savedSize) / float64(stats.SizeBefore) * 100
-
-		fmt.Printf("Total size before: %s\n", FormatBytes(stats.SizeBefore))
-		fmt.Printf("Total size after: %s\n", FormatBytes(stats.SizeAfter))
-		fmt.Printf("Saved size: %s (%.2f%%)\n", FormatBytes(savedSize), saved)
-	}
-
-	if len(stats.Failed) > 0 {
-		fmt.Println("Following files are failed:")
-
-		for _, path := range stats.Failed {
-			fmt.Printf("\t%s\n", path)
-		}
 	}
 }
