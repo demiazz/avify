@@ -1,16 +1,19 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
+	"sync"
 
 	"github.com/davidbyttow/govips/v2/vips"
-	bar "github.com/schollz/progressbar/v3"
+	"golang.org/x/sync/semaphore"
 )
 
 // region Variables
@@ -23,6 +26,8 @@ var AvifExportParams = &vips.AvifExportParams{
 	Quality:       80,
 	StripMetadata: false,
 }
+
+var Concurrency = runtime.NumCPU()
 
 // endregion Variables
 
@@ -75,10 +80,6 @@ func FormatBytes(bytes uint64) string {
 // region Traverse
 
 func FindImagesAt(root string) ([]string, error) {
-	progress := bar.NewOptions64(-1, bar.OptionShowCount(), bar.OptionSetDescription("searching images..."))
-
-	defer progress.Close()
-
 	r, err := regexp.Compile(AllowedExtensions)
 
 	if err != nil {
@@ -97,8 +98,6 @@ func FindImagesAt(root string) ([]string, error) {
 		}
 
 		if matched := r.MatchString(path); matched {
-			progress.Add64(1)
-
 			files = append(files, path)
 		}
 
@@ -147,21 +146,52 @@ func ConvertImage(path string) (uint64, uint64, error) {
 }
 
 func ConvertImages(paths []string) (uint64, uint64, error) {
-	var oldSizeTotal uint64
-	var newSizeTotal uint64
+	var oldTotalSize uint64
+	var newTotalSize uint64
+
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+
+	maxWorkers := Concurrency
+	sem := semaphore.NewWeighted(int64(maxWorkers))
+
+	errChan := make(chan error, len(paths))
 
 	for _, path := range paths {
-		oldSize, newSize, err := ConvertImage(path)
+		wg.Add(1)
 
-		if err != nil {
-			return 0, 0, err
-		}
+		sem.Acquire(context.TODO(), 1)
 
-		oldSizeTotal += oldSize
-		newSizeTotal += newSize
+		go func(path string) {
+			defer wg.Done()
+			defer sem.Release(1)
+
+			oldSize, newSize, err := ConvertImage(path)
+
+			if err != nil {
+				errChan <- err
+
+				return
+			}
+
+			mu.Lock()
+
+			oldTotalSize += oldSize
+			newTotalSize += newSize
+
+			mu.Unlock()
+		}(path)
 	}
 
-	return oldSizeTotal, newSizeTotal, nil
+	wg.Wait()
+
+	close(errChan)
+
+	if len(errChan) > 0 {
+		return 0, 0, <-errChan
+	}
+
+	return oldTotalSize, newTotalSize, nil
 }
 
 // endregion Convert
@@ -169,7 +199,13 @@ func ConvertImages(paths []string) (uint64, uint64, error) {
 func main() {
 	vips.LoggingSettings(nil, vips.LogLevelError)
 
-	vips.Startup(nil)
+	vips.Startup(&vips.Config{
+		ConcurrencyLevel: Concurrency,
+		MaxCacheMem:      0,
+		MaxCacheSize:     0,
+		MaxCacheFiles:    0,
+		CacheTrace:       false,
+	})
 
 	defer vips.Shutdown()
 
