@@ -13,12 +13,13 @@ import (
 	"sync"
 
 	"github.com/davidbyttow/govips/v2/vips"
+	"github.com/schollz/progressbar/v3"
 	"golang.org/x/sync/semaphore"
 )
 
 // region Variables
 
-const AllowedExtensions = `\.(jpg|jpeg|png)$`
+const AllowedExtensions = `\.(gif|jpg|jpeg|png|webp)$`
 
 var AvifExportParams = &vips.AvifExportParams{
 	Effort:        5,
@@ -28,6 +29,23 @@ var AvifExportParams = &vips.AvifExportParams{
 }
 
 var Concurrency = runtime.NumCPU()
+
+var Progress = progressbar.NewOptions(0,
+	progressbar.OptionEnableColorCodes(true),
+	progressbar.OptionSetElapsedTime(true),
+	progressbar.OptionSetPredictTime(false),
+	progressbar.OptionSetTheme(progressbar.Theme{
+		Saucer:        "[cyan]=[reset]",
+		SaucerHead:    "[cyan]>[reset]",
+		SaucerPadding: " ",
+		BarStart:      "[",
+		BarEnd:        "]",
+	}),
+	progressbar.OptionShowBytes(false),
+	progressbar.OptionShowCount(),
+	progressbar.OptionShowElapsedTimeOnFinish(),
+	progressbar.OptionSpinnerType(14),
+)
 
 // endregion Variables
 
@@ -86,7 +104,14 @@ func FindImagesAt(root string) ([]string, error) {
 		return nil, err
 	}
 
+	Progress.ChangeMax(-1)
+	Progress.Describe("[cyan]Search images...[reset]")
+
+	defer Progress.Exit()
+
 	var files []string
+
+	var count int
 
 	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -98,6 +123,14 @@ func FindImagesAt(root string) ([]string, error) {
 		}
 
 		if matched := r.MatchString(path); matched {
+			count += 1
+
+			if count >= 20 {
+				Progress.Add(count)
+
+				count = 0
+			}
+
 			files = append(files, path)
 		}
 
@@ -128,8 +161,6 @@ func ConvertImage(path string) (uint64, uint64, error) {
 		return 0, 0, err
 	}
 
-	oldSize := reader.count
-
 	bytes, _, err := image.ExportAvif(AvifExportParams)
 
 	if err != nil {
@@ -142,42 +173,50 @@ func ConvertImage(path string) (uint64, uint64, error) {
 		return 0, 0, err
 	}
 
-	return uint64(oldSize), uint64(len(bytes)), nil
+	return uint64(reader.count), uint64(len(bytes)), nil
 }
 
-func ConvertImages(paths []string) (uint64, uint64, error) {
-	var oldTotalSize uint64
-	var newTotalSize uint64
+type Stats struct {
+	Failed []string
 
-	var wg sync.WaitGroup
-	var mu sync.Mutex
+	SizeBefore uint64
+	SizeAfter  uint64
+}
 
-	maxWorkers := Concurrency
-	sem := semaphore.NewWeighted(int64(maxWorkers))
+func ConvertImages(paths []string) (*Stats, error) {
+	Progress.Reset()
+	Progress.ChangeMax(len(paths))
+	Progress.Describe("[cyan]Converting images...[reset]")
 
-	errChan := make(chan error, len(paths))
+	defer Progress.Exit()
+
+	stats := &Stats{}
+
+	wg := sync.WaitGroup{}
+	mu := sync.Mutex{}
+	sm := semaphore.NewWeighted(int64(Concurrency))
 
 	for _, path := range paths {
 		wg.Add(1)
 
-		sem.Acquire(context.TODO(), 1)
+		sm.Acquire(context.TODO(), 1)
 
 		go func(path string) {
 			defer wg.Done()
-			defer sem.Release(1)
+			defer sm.Release(1)
 
-			oldSize, newSize, err := ConvertImage(path)
-
-			if err != nil {
-				errChan <- err
-
-				return
-			}
+			sizeBefore, sizeAfter, err := ConvertImage(path)
 
 			mu.Lock()
 
-			oldTotalSize += oldSize
-			newTotalSize += newSize
+			Progress.Add(1)
+
+			if err != nil {
+				stats.Failed = append(stats.Failed, path)
+			} else {
+				stats.SizeBefore += sizeBefore
+				stats.SizeAfter += sizeAfter
+			}
 
 			mu.Unlock()
 		}(path)
@@ -185,13 +224,7 @@ func ConvertImages(paths []string) (uint64, uint64, error) {
 
 	wg.Wait()
 
-	close(errChan)
-
-	if len(errChan) > 0 {
-		return 0, 0, <-errChan
-	}
-
-	return oldTotalSize, newTotalSize, nil
+	return stats, nil
 }
 
 // endregion Convert
@@ -217,11 +250,17 @@ func main() {
 		panic(err)
 	}
 
-	oldSize, newSize, err := ConvertImages(paths)
+	if len(paths) == 0 {
+		fmt.Println("No images found")
+
+		return
+	}
+
+	stats, err := ConvertImages(paths)
 
 	if err != nil {
 		panic(err)
 	}
 
-	fmt.Printf("Before: %s, After: %s\n", FormatBytes(oldSize), FormatBytes(newSize))
+	fmt.Printf("\nBefore: %s, After: %s\n", FormatBytes(stats.SizeBefore), FormatBytes(stats.SizeAfter))
 }
